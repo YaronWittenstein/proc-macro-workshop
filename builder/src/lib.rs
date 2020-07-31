@@ -6,13 +6,13 @@ use std::collections::HashSet;
 
 use proc_macro2::{Ident, Span, TokenStream};
 use syn::{
-    parse_macro_input, punctuated::Punctuated, Data, DeriveInput, Field, Fields, FieldsNamed, Path,
-    PathArguments, PathSegment, Token, Type, Visibility,
+    parse_macro_input, punctuated::Punctuated, Attribute, Data, DeriveInput, Field, Fields,
+    FieldsNamed, Lit, Meta, NestedMeta, Path, PathArguments, PathSegment, Token, Type, Visibility,
 };
 
 use quote::{quote, ToTokens};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -67,13 +67,11 @@ fn builder_fields(fields: &Fields) -> TokenStream {
             let ident = &f.ident;
             let colon_token = &f.colon_token;
 
-            let new_ty = if is_optional(f) {
+            let new_ty = if is_optional(f) || is_builder_field(f) {
                 quote! { #ty }
             } else {
                 quote! { Option< #ty >}
             };
-
-            assert_eq!(f.attrs.len(), 0);
 
             quote! {
                 #vis #ident #colon_token #new_ty
@@ -106,10 +104,21 @@ fn builder_setters(fields: &Fields) -> TokenStream {
             } else {
                 let ty = &f.ty;
 
-                quote! {
-                    fn #name(&mut self, #name: #ty) -> &mut Self {
-                      self.#name = Some(#name);
-                      self
+                if is_builder_field(f) {
+                    let each = builder_attr_each(f);
+
+                    quote! {
+                        fn #each(&mut self, #each: String) -> &mut Self {
+                          self.#name.push(#each);
+                          self
+                        }
+                    }
+                } else {
+                    quote! {
+                        fn #name(&mut self, #name: #ty) -> &mut Self {
+                          self.#name = Some(#name);
+                          self
+                        }
                     }
                 }
             }
@@ -127,13 +136,17 @@ fn builder_defaults(fields: &Fields) -> TokenStream {
     let defaults: Vec<_> = fields
         .iter()
         .map(|f| {
-            assert_eq!(f.attrs.len(), 0);
-
             let ident = &f.ident;
             let colon_token = &f.colon_token;
 
-            quote! {
-                #ident #colon_token None
+            if is_builder_field(f) {
+                quote! {
+                    #ident #colon_token Vec::new()
+                }
+            } else {
+                quote! {
+                    #ident #colon_token None
+                }
             }
         })
         .collect();
@@ -148,7 +161,7 @@ fn builder_defaults(fields: &Fields) -> TokenStream {
 fn builder_build(fields: &Fields, base_ident: &Ident, builder_ident: &Ident) -> TokenStream {
     let missing_values_checkers: Vec<TokenStream> = fields
         .iter()
-        .filter(|f| is_optional(f) == false)
+        .filter(|f| is_optional(f) == false && is_builder_field(f) == false)
         .map(|f| {
             let ident = f.ident.as_ref().unwrap();
             let ident_str = format!("{}", ident);
@@ -168,7 +181,11 @@ fn builder_build(fields: &Fields, base_ident: &Ident, builder_ident: &Ident) -> 
             let ident: &Ident = &f.ident.as_ref().unwrap();
             let local = Ident::new(&format!("{}_local", &ident), Span::call_site());
 
-            if is_optional(f) {
+            if is_builder_field(f) {
+                quote! {
+                    let #local = self.#ident.clone();
+                }
+            } else if is_optional(f) {
                 quote! {
                     let #local =
                         if self.#ident.is_some() {
@@ -233,6 +250,30 @@ fn is_optional(f: &Field) -> bool {
     false
 }
 
+fn is_builder_field(f: &Field) -> bool {
+    f.attrs.iter().any(is_builder_attr)
+}
+
+fn is_builder_attr(attr: &Attribute) -> bool {
+    let meta: Meta = attr.parse_meta().unwrap();
+
+    match meta {
+        Meta::List(list) => {
+            let path = &list.path;
+            let segment: &PathSegment = &path.segments.first().unwrap();
+
+            let ident = format!("{}", &segment.ident);
+
+            if ident == "builder" {
+                return true;
+            }
+        }
+        _ => (),
+    }
+
+    false
+}
+
 fn optional_inner_ty(f: &Field) -> TokenStream {
     if let Type::Path(ref path) = &f.ty {
         let path: &Path = &path.path;
@@ -253,6 +294,41 @@ fn optional_inner_ty(f: &Field) -> TokenStream {
             }
             _ => unreachable!(),
         };
+    }
+
+    unreachable!()
+}
+
+fn builder_attr_each(f: &Field) -> Ident {
+    for attr in f.attrs.iter() {
+        let meta: Meta = attr.parse_meta().unwrap();
+
+        match meta {
+            Meta::List(list) => {
+                let path = &list.path;
+                let segment: &PathSegment = &path.segments.first().unwrap();
+
+                let ident = format!("{}", &segment.ident);
+
+                if ident == "builder" {
+                    let nested: &Punctuated<NestedMeta, Token![,]> = &list.nested;
+                    assert_eq!(nested.len(), 1);
+
+                    let nested: &NestedMeta = nested.first().unwrap();
+
+                    match nested {
+                        NestedMeta::Meta(Meta::NameValue(nv)) => match nv.lit {
+                            Lit::Str(ref lit_str) => {
+                                return Ident::new(&lit_str.value(), Span::call_site())
+                            }
+                            _ => unreachable!(),
+                        },
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => continue,
+        }
     }
 
     unreachable!()
