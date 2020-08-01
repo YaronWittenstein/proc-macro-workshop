@@ -21,27 +21,33 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let fields = extract_fields(&input);
     let defaults = builder_defaults(&fields);
-    let setters = builder_setters(&fields);
     let builder_fields = builder_fields(&fields);
     let build_func = builder_build(&fields, &base_ident, &builder_ident);
 
-    let ast = quote! {
-        use std::error::Error;
+    let setters = builder_setters(&fields);
 
-        pub struct #builder_ident {
-            #builder_fields
-        }
+    let ast = match setters {
+        Err(err) => err,
+        Ok(setters) => {
+            quote! {
+                use std::error::Error;
 
-        impl #base_ident {
-            pub fn builder() -> #builder_ident {
-                #builder_ident { #defaults }
+                pub struct #builder_ident {
+                    #builder_fields
+                }
+
+                impl #base_ident {
+                    pub fn builder() -> #builder_ident {
+                        #builder_ident { #defaults }
+                    }
+                }
+
+                impl #builder_ident {
+                    #setters
+
+                    #build_func
+                }
             }
-        }
-
-        impl #builder_ident {
-            #setters
-
-            #build_func
         }
     };
 
@@ -86,7 +92,7 @@ fn builder_fields(fields: &Fields) -> TokenStream {
     ast.into()
 }
 
-fn builder_setters(fields: &Fields) -> TokenStream {
+fn builder_setters(fields: &Fields) -> Result<TokenStream, TokenStream> {
     let setters: Vec<_> = fields
         .iter()
         .map(|f| {
@@ -105,13 +111,14 @@ fn builder_setters(fields: &Fields) -> TokenStream {
                 let ty = &f.ty;
 
                 if is_builder_field(f) {
-                    let each = builder_attr_each(f);
-
-                    quote! {
-                        fn #each(&mut self, #each: String) -> &mut Self {
-                          self.#name.push(#each);
-                          self
-                        }
+                    match builder_attr_each(f) {
+                        Ok(each) => quote! {
+                           fn #each(&mut self, #each: String) -> &mut Self {
+                             self.#name.push(#each);
+                             self
+                           }
+                        },
+                        Err(err) => return err,
                     }
                 } else {
                     quote! {
@@ -129,7 +136,7 @@ fn builder_setters(fields: &Fields) -> TokenStream {
         #(#setters)*
     };
 
-    ast.into()
+    Ok(ast.into())
 }
 
 fn builder_defaults(fields: &Fields) -> TokenStream {
@@ -299,7 +306,7 @@ fn optional_inner_ty(f: &Field) -> TokenStream {
     unreachable!()
 }
 
-fn builder_attr_each(f: &Field) -> Ident {
+fn builder_attr_each(f: &Field) -> Result<TokenStream, TokenStream> {
     for attr in f.attrs.iter() {
         let meta: Meta = attr.parse_meta().unwrap();
 
@@ -317,18 +324,24 @@ fn builder_attr_each(f: &Field) -> Ident {
                     let nested: &NestedMeta = nested.first().unwrap();
 
                     match nested {
-                        NestedMeta::Meta(Meta::NameValue(nv)) => match nv.lit {
-                            Lit::Str(ref lit_str) => {
-                                let lit_str = &lit_str.value();
+                        NestedMeta::Meta(Meta::NameValue(nv)) => {
+                            let nv_ident = nv.path.get_ident().unwrap();
 
-                                if lit_str != "each" {
-                                    // compile_error!(r#"expected `builder(each = "...")`"#);
-                                }
-
-                                return Ident::new(&lit_str, Span::call_site());
+                            if nv_ident.to_string() != "each" {
+                                let err = r#"expected `builder(each = "...")""#;
+                                return Err(quote! { compile_error!(#err) });
                             }
-                            _ => unreachable!(),
-                        },
+
+                            match nv.lit {
+                                Lit::Str(ref lit_str) => {
+                                    let lit_str = &lit_str.value();
+                                    let ident = Ident::new(&lit_str, Span::call_site());
+
+                                    return Ok(quote! { #ident });
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
                         _ => unreachable!(),
                     }
                 }
