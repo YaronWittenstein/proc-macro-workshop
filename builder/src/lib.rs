@@ -70,7 +70,7 @@ fn builder_fields(fields: &Fields) -> TokenStream {
             let new_ty = if is_optional(f) || is_builder_field(f) {
                 quote! { #ty }
             } else {
-                quote! { Option< #ty >}
+                quote! { std::option::Option< #ty >}
             };
 
             quote! {
@@ -97,7 +97,7 @@ fn builder_setters(fields: &Fields) -> TokenStream {
 
                 quote! {
                     fn #name(&mut self, #name: #ty) -> &mut Self {
-                      self.#name = Some(#name);
+                      self.#name = std::option::Option::Some(#name);
                       self
                     }
                 }
@@ -116,7 +116,7 @@ fn builder_setters(fields: &Fields) -> TokenStream {
                 } else {
                     quote! {
                         fn #name(&mut self, #name: #ty) -> &mut Self {
-                          self.#name = Some(#name);
+                          self.#name = std::option::Option::Some(#name);
                           self
                         }
                     }
@@ -145,7 +145,7 @@ fn builder_defaults(fields: &Fields) -> TokenStream {
                 }
             } else {
                 quote! {
-                    #ident #colon_token None
+                    #ident #colon_token std::option::Option::None
                 }
             }
         })
@@ -192,7 +192,7 @@ fn builder_build(fields: &Fields, base_ident: &Ident, builder_ident: &Ident) -> 
                             self.#ident.take()
                         }
                         else {
-                            None
+                            std::option::Option::None
                         };
                 }
             } else {
@@ -217,7 +217,7 @@ fn builder_build(fields: &Fields, base_ident: &Ident, builder_ident: &Ident) -> 
         .collect();
 
     quote! {
-        pub fn build(&mut self) -> Result<#base_ident, Box<dyn Error>> {
+        pub fn build(&mut self) -> std::result::Result<#base_ident, std::boxed::Box<dyn std::error::Error>> {
             self.assert_non_missing_values()?;
 
             #(#locals)*
@@ -229,7 +229,7 @@ fn builder_build(fields: &Fields, base_ident: &Ident, builder_ident: &Ident) -> 
             Ok(instance)
         }
 
-        fn assert_non_missing_values(&self) -> Result<(), Box<dyn Error>> {
+        fn assert_non_missing_values(&self) -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
             #(#missing_values_checkers)*
 
             Ok(())
@@ -319,7 +319,13 @@ fn builder_attr_each(f: &Field) -> Ident {
                     match nested {
                         NestedMeta::Meta(Meta::NameValue(nv)) => match nv.lit {
                             Lit::Str(ref lit_str) => {
-                                return Ident::new(&lit_str.value(), Span::call_site())
+                                let lit_str = &lit_str.value();
+
+                                if lit_str != "each" {
+                                    // compile_error!(r#"expected `builder(each = "...")`"#);
+                                }
+
+                                return Ident::new(&lit_str, Span::call_site());
                             }
                             _ => unreachable!(),
                         },
